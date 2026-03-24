@@ -55,3 +55,8 @@ HOTSPOT_HISTORY_FRAMES = 10    # rolling window of frames for hotspot averaging
 MOVEMENT_HISTORY_FRAMES = 10   # frames of position history to compute velocity
 CONVERGENCE_THRESHOLD = 3      # people flowing toward same cell to flag convergence
 MOVEMENT_SPEED_MIN = 2.0       # minimum pixel displacement per frame to count as "moving"
+
+# --- External Camera Streaming ---
+CAMERA_SECRET_KEY = "crowdwatch-2024-hackathon"   # used to generate auth tokens for QR URLs
+CAMERA_FRAME_INTERVAL = 1.0 / 15                  # phone streams at ~15 FPS to save bandwidth
+CAMERA_MAX_DEVICES = 8                             # max simultaneous camera connections

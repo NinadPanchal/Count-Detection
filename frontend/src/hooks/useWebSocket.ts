@@ -2,6 +2,49 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
+interface Hotspot {
+  cell: [number, number];
+  coords: [number, number, number, number];
+  norm_coords: [number, number, number, number];
+  count: number;
+  avg_count: number;
+  severity: "warning" | "critical";
+  persistent: boolean;
+  frames_active: number;
+}
+
+interface MovementTrend {
+  zone_id: string;
+  cell: [number, number];
+  direction: string;
+  avg_speed: number;
+  people_moving: number;
+}
+
+interface ConvergenceZone {
+  cell: [number, number];
+  norm_coords: [number, number, number, number];
+  inflow_count: number;
+  directions_from: string[];
+}
+
+interface MovementData {
+  trends: MovementTrend[];
+  convergence_zones: ConvergenceZone[];
+  overall_direction: string;
+  avg_speed: number;
+}
+
+interface AlertData {
+  id: string;
+  type: string;
+  severity: string;
+  message: string;
+  count?: number;
+  time_str: string;
+  timestamp: number;
+}
+
 interface FrameData {
   type: string;
   frame: string;
@@ -22,28 +65,25 @@ interface FrameData {
     timestamp: number;
     time_str: string;
   };
-  alert?: {
-    id: string;
-    type: string;
-    severity: string;
-    message: string;
-    count: number;
-    time_str: string;
-    timestamp: number;
-  };
+  hotspots?: Hotspot[];
+  movement?: MovementData;
+  alert?: AlertData;
+  extra_alerts?: AlertData[];
 }
 
 interface UseWebSocketReturn {
   frameData: FrameData | null;
-  alerts: Array<FrameData["alert"]>;
+  alerts: Array<AlertData | undefined>;
   isConnected: boolean;
   error: string | null;
   reconnect: () => void;
 }
 
+export type { Hotspot, MovementTrend, ConvergenceZone, MovementData, AlertData, FrameData };
+
 export function useWebSocket(url: string): UseWebSocketReturn {
   const [frameData, setFrameData] = useState<FrameData | null>(null);
-  const [alerts, setAlerts] = useState<Array<FrameData["alert"]>>([]);
+  const [alerts, setAlerts] = useState<Array<AlertData | undefined>>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -70,9 +110,14 @@ export function useWebSocket(url: string): UseWebSocketReturn {
           const data: FrameData = JSON.parse(event.data);
           setFrameData(data);
 
-          if (data.alert) {
+          // Collect all alerts from this frame
+          const frameAlerts: AlertData[] = [];
+          if (data.alert) frameAlerts.push(data.alert);
+          if (data.extra_alerts) frameAlerts.push(...data.extra_alerts);
+
+          if (frameAlerts.length > 0) {
             setAlerts((prev) => {
-              const newAlerts = [data.alert, ...prev].slice(0, 20);
+              const newAlerts = [...frameAlerts, ...prev].slice(0, 30);
               return newAlerts;
             });
           }

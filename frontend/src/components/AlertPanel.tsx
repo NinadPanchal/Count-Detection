@@ -23,18 +23,25 @@ export default function AlertPanel({ alerts, isConnected }: AlertPanelProps) {
 
   useEffect(() => {
     const filtered = alerts.filter((a): a is Alert => a !== undefined);
-    setVisibleAlerts(filtered.slice(0, 10));
+    setVisibleAlerts(filtered.slice(0, 15));
   }, [alerts]);
 
   const getPillClass = (type: string) => {
+    if (type === "dispatch") return "pill-dispatch";
     if (type === "critical") return "pill-critical";
+    if (type === "hotspot") return "pill-critical";
     if (type === "warning") return "pill-warning";
+    if (type === "convergence") return "pill-warning";
     return "pill-safe";
   };
 
   const getLabel = (type: string) => {
+    if (type === "dispatch") return "🚨 Dispatch";
     if (type === "critical") return "Critical";
+    if (type === "hotspot") return "Hotspot";
     if (type === "warning") return "Warning";
+    if (type === "convergence") return "Trend";
+    if (type === "resolved") return "Resolved";
     return "Info";
   };
 
@@ -61,10 +68,7 @@ export default function AlertPanel({ alerts, isConnected }: AlertPanelProps) {
       </div>
 
       {/* Alert List */}
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-y-auto"
-      >
+      <div ref={containerRef} className="flex-1 overflow-y-auto">
         {visibleAlerts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-center h-full">
             <div className="w-10 h-10 rounded-xl bg-[var(--color-bg-elevated)] border border-[var(--color-border)] flex items-center justify-center mb-3">
@@ -80,7 +84,9 @@ export default function AlertPanel({ alerts, isConnected }: AlertPanelProps) {
             {visibleAlerts.map((alert, index) => (
               <div
                 key={alert.id}
-                className="animate-slide-in-bottom flex items-start gap-3 px-5 py-3.5 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]/50 transition-colors"
+                className={`animate-slide-in-bottom flex items-start gap-3 px-5 py-3.5 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]/50 transition-colors ${
+                  alert.type === "dispatch" ? "bg-[var(--color-critical-muted)]/30" : ""
+                }`}
                 style={{ animationDelay: `${index * 40}ms` }}
               >
                 {/* Severity pill */}
@@ -92,7 +98,9 @@ export default function AlertPanel({ alerts, isConnected }: AlertPanelProps) {
 
                 {/* Message */}
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs text-[var(--color-text-primary)] leading-relaxed">
+                  <p className={`text-xs leading-relaxed ${
+                    alert.type === "dispatch" ? "text-[var(--color-critical)] font-semibold" : "text-[var(--color-text-primary)]"
+                  }`}>
                     {alert.message}
                   </p>
                 </div>
