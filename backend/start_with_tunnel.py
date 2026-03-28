@@ -8,7 +8,7 @@ def get_tunnel():
     print("[Tunnel] Starting SSH tunnel to serveo.net...")
     proc = subprocess.Popen(
         ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", 
-         "-o", "ServerAliveInterval=60", "-R", "80:localhost:8000", "serveo.net"],
+         "-o", "ServerAliveInterval=60", "-R", f"80:localhost:{config.PORT}", "serveo.net"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
@@ -23,7 +23,7 @@ def get_tunnel():
             continue
         print(f"[SSH] {line.strip()}")
         
-        match = re.search(r'(https://[a-zA-Z0-9-]+\.serveousercontent\.com)', line)
+        match = re.search(r'(https://[^\s\x1b]+)', line)
         if match:
             url = match.group(1)
             break
@@ -41,8 +41,10 @@ def get_tunnel():
         sys.exit(1)
 
 if __name__ == "__main__":
-    # Ensure port 8000 is free first
-    print("[Tunnel] Cleaning up old processes...")
-    subprocess.run("lsof -ti :8000 | xargs kill -9 2>/dev/null", shell=True)
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    import config
+    # Ensure active port is free first
+    print(f"[Tunnel] Cleaning up old processes on port {config.PORT}...")
+    subprocess.run(f"lsof -ti :{config.PORT} | xargs kill -9 2>/dev/null", shell=True)
     subprocess.run("pkill -f serveo 2>/dev/null", shell=True)
     get_tunnel()

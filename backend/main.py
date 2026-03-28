@@ -11,6 +11,7 @@ import socket
 import time
 import os
 import uuid
+import threading
 
 import cv2
 import numpy as np
@@ -18,6 +19,7 @@ import qrcode
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, Response
+from pydantic import BaseModel
 
 from detector import PersonDetector
 from density import DensityEstimator
@@ -25,54 +27,13 @@ from alerts import AlertEngine
 from crowd_intelligence import HotspotDetector, MovementAnalyzer
 from device_manager import DeviceManager
 from camera_page import get_camera_html
+from analytics_tracker import AnalyticsTracker
 import config
 
-app = FastAPI(
-    title="CrowdWatch API",
-    description="Real-time Crowd Management & Density Monitoring",
-    version="1.0.0",
-)
+from contextlib import asynccontextmanager
 
-# CORS for frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Global state
-detector: PersonDetector | None = None
-density_estimator = DensityEstimator()
-alert_engine = AlertEngine()
-hotspot_detector = HotspotDetector()
-movement_analyzer = MovementAnalyzer()
-device_manager = DeviceManager()
-tunnel_url: str | None = None  # Set by ngrok on startup
-system_stats = {
-    "fps": 0,
-    "total_frames_processed": 0,
-    "uptime_start": time.time(),
-    "is_processing": False,
-    "video_source": config.VIDEO_SOURCE,
-}
-
-
-def get_local_ip() -> str:
-    """Get the local network IP address."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global detector, tunnel_url
     try:
         import ssl
@@ -102,6 +63,129 @@ async def startup():
             print(f"[CrowdWatch] No tunnel ({e}), using local IP")
             tunnel_url = None
 
+    # Start the daemon for background preview processing
+    threading.Thread(target=background_preview_generator, daemon=True).start()
+    print("[CrowdWatch] Started background preview generator multi-threading")
+    yield  # Runs the app
+
+app = FastAPI(
+    title="CrowdWatch API",
+    description="Real-time Crowd Management & Density Monitoring",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global state
+detector: PersonDetector | None = None
+inference_lock = threading.Lock()
+density_estimator = DensityEstimator()
+alert_engine = AlertEngine()
+hotspot_detector = HotspotDetector()
+movement_analyzer = MovementAnalyzer()
+device_manager = DeviceManager()
+global_analytics = AnalyticsTracker()
+tunnel_url: str | None = None  # Set by ngrok on startup
+
+# Global Video Source Manager
+current_video_source = config.VIDEO_SOURCE
+GLOBAL_PREVIEWS = {}
+
+system_stats = {
+    "fps": 0,
+    "total_frames_processed": 0,
+    "uptime_start": time.time(),
+    "is_processing": False,
+    "video_source": current_video_source,
+}
+
+
+def get_local_ip() -> str:
+    """Get the local network IP address."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def background_preview_generator():
+    """Continuously generates 1-FPS preview frames for inactive videos."""
+    caps = {}
+    
+    while True:
+        if detector is None:
+            time.sleep(5)
+            continue
+            
+        active_video_paths = [cam["path"] for cam in config.AVAILABLE_CAMERAS]
+        
+        # Cleanup old caps
+        for k in list(caps.keys()):
+            if k not in active_video_paths:
+                caps[k].release()
+                del caps[k]
+                
+        for cam in config.AVAILABLE_CAMERAS:
+            v_path = cam["path"]
+            v_id = cam["id"]
+            
+            if v_path == current_video_source or v_path == os.path.basename(current_video_source):
+                continue # Skip the currently active global stream
+                
+            full_path = os.path.join(os.getcwd(), v_path)
+            if not os.path.exists(full_path):
+                continue
+                
+            if v_path not in caps:
+                caps[v_path] = cv2.VideoCapture(full_path)
+                
+            cap = caps[v_path]
+            
+            # Skip 25 frames to simulate real-time progression while we slept 1 second
+            for _ in range(25): 
+                cap.grab()
+            
+            ret, frame = cap.read()
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = cap.read()
+                
+            if ret:
+                frame = cv2.resize(frame, (480, 270))
+                try:
+                    # Use strictly CPU-based cascades for backgrounds to free PyTorch entirely for active dashboard stream!!
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    h, w = gray.shape
+                    small_gray = cv2.resize(gray, (int(w * 0.5), int(h * 0.5)))
+                    
+                    faces = detector.face_cascade.detectMultiScale(small_gray, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
+                    profiles = detector.profile_cascade.detectMultiScale(small_gray, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
+                    
+                    count = len(faces) + len(profiles)
+                    
+                    for (fx, fy, fw, fh) in faces:
+                        rx, ry, rw, rh = int(fx/0.5), int(fy/0.5), int(fw/0.5), int(fh/0.5)
+                        cv2.rectangle(frame, (rx, ry), (rx+rw, ry+rh), (0, 255, 156), 2)
+                                
+                    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    b64 = base64.b64encode(buffer).decode("utf-8")
+                    GLOBAL_PREVIEWS[v_id] = {"frame": b64, "count": count}
+                except Exception as e:
+                    print(f"[Preview] Error on {v_path}: {e}")
+                    
+        time.sleep(1.0) # 1 FPS refresh rate for background previews
 
 @app.get("/api/status")
 async def get_status():
@@ -135,6 +219,60 @@ async def get_config():
         "zones": config.ZONES,
         "confidence_threshold": config.CONFIDENCE_THRESHOLD,
     })
+
+
+@app.get("/api/analytics")
+async def api_get_analytics():
+    """Get aggregated analytics tracker stats (replacing frontend mock data)."""
+    return JSONResponse(global_analytics.get_summary_stats())
+
+
+class VideoSwitchRequest(BaseModel):
+    filename: str
+
+@app.get("/api/videos")
+async def get_videos():
+    """List available local videos explicitly mapped in config.py."""
+    videos = []
+    for cam in config.AVAILABLE_CAMERAS:
+        full_path = os.path.join(os.getcwd(), cam["path"])
+        size_mb = 0
+        status = "offline"
+        if os.path.exists(full_path):
+            size_mb = round(os.path.getsize(full_path) / (1024 * 1024), 2)
+            status = "online"
+            
+        videos.append({
+            "id": cam["id"],
+            "name": cam["name"],
+            "path": cam["path"],
+            "zone": cam.get("zone", ""),
+            "size_mb": size_mb,
+            "status": status,
+        })
+    return JSONResponse({"videos": videos, "active": current_video_source})
+
+@app.get("/api/videos/live")
+async def api_videos_live():
+    """Returns the latest detection-burned base64 snapshot for all background videos."""
+    return JSONResponse(GLOBAL_PREVIEWS)
+
+@app.post("/api/video/switch")
+async def switch_video(req: VideoSwitchRequest):
+    """Switch the global video feed source. The active /ws/video stream will hot-swap on next frame."""
+    global current_video_source
+    target = req.filename
+    if not target.startswith("sample_video/") and target != "0":
+        target = f"sample_video/{target}"
+    
+    if os.path.exists(target) or target == "0":
+        old_source = current_video_source
+        current_video_source = target
+        system_stats["video_source"] = current_video_source
+        print(f"[CrowdWatch] 🔄 Video source switched: {old_source} → {current_video_source}")
+        return JSONResponse({"status": "success", "active": current_video_source})
+    else:
+        return JSONResponse({"status": "error", "message": f"File not found: {target}"}, status_code=404)
 
 
 def draw_detections(frame: np.ndarray, detections: list[dict], density_level: str) -> np.ndarray:
@@ -336,19 +474,19 @@ async def video_websocket(websocket: WebSocket):
     await websocket.accept()
     print("[WebSocket] Client connected")
 
-    # Open video source
-    source = config.VIDEO_SOURCE
-    if source == "0" or source == 0:
+    global current_video_source
+    local_source = current_video_source
+    if local_source == "0" or local_source == 0:
         cap = cv2.VideoCapture(0)
     else:
-        if not os.path.exists(source):
+        if not os.path.exists(local_source):
             await websocket.send_json({
                 "type": "error",
-                "message": f"Video source not found: {source}",
+                "message": f"Video source not found: {local_source}",
             })
             await websocket.close()
             return
-        cap = cv2.VideoCapture(source)
+        cap = cv2.VideoCapture(local_source)
 
     if not cap.isOpened():
         await websocket.send_json({
@@ -363,54 +501,83 @@ async def video_websocket(websocket: WebSocket):
     fps_start = time.time()
     current_fps = 0
 
+    # Get source video FPS for accurate pacing
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    target_interval = 1.0 / source_fps
+
+    # Detection state — reuse between frames for smooth playback
+    last_detections = []
+    last_density_data = {"total_count": 0, "density_level": "safe", "zones": []}
+    last_hotspot_data = {"hotspots": [], "grid_density": []}
+    last_movement_data = {"trends": [], "convergence_zones": [], "overall_direction": "stable", "avg_speed": 0}
+    last_heatmap_b64 = ""
+    detect_every_n = 1  # 1 = MAX POWER (run AI detection on every frame for the active stream)
+    video_frame_idx = 0
+
     try:
         while True:
+            frame_start = time.time()
+            
+            if current_video_source != local_source:
+                local_source = current_video_source
+                cap.release()
+                if local_source == "0" or local_source == 0:
+                    cap = cv2.VideoCapture(0)
+                else:
+                    cap = cv2.VideoCapture(local_source)
+                
+                if cap.isOpened():
+                    source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                    target_interval = 1.0 / source_fps
+                else:
+                    print(f"[WebSocket] Failed to hot-swap to {local_source}")
+                    break
+                
+                video_frame_idx = 0
+                last_detections = []
+                system_stats["video_source"] = local_source
+
             ret, frame = cap.read()
             if not ret:
                 # Loop video for demo
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                video_frame_idx = 0
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-            # Resize for performance (720p max)
-            h, w = frame.shape[:2]
-            if w > 1280:
-                scale = 1280 / w
-                frame = cv2.resize(frame, (1280, int(h * scale)))
+            video_frame_idx += 1
 
-            # Detect & track
-            detections = detector.detect_and_track(frame)
+            # Run full AI pipeline only every N frames for speed
+            if video_frame_idx % detect_every_n == 1 or detect_every_n == 1:
+                with inference_lock:
+                    if detector:
+                        last_detections = detector.detect_and_track(frame)
+                    else:
+                        last_detections = []
 
-            # Density estimation
-            density_data = density_estimator.calculate_density(
-                detections, frame.shape
-            )
+                last_density_data = density_estimator.calculate_density(
+                    last_detections, frame.shape
+                )
 
-            # Crowd intelligence
-            hotspot_data = hotspot_detector.analyze(detections, frame.shape)
-            movement_data = movement_analyzer.analyze(detections, frame.shape)
+                last_hotspot_data = hotspot_detector.analyze(last_detections, frame.shape)
+                last_movement_data = movement_analyzer.analyze(last_detections, frame.shape)
 
-            # Generate heatmap with hotspot overlays
-            heatmap_b64 = density_estimator.generate_heatmap(
-                detections, frame, hotspots=hotspot_data["hotspots"]
-            )
+                last_heatmap_b64 = density_estimator.generate_heatmap(
+                    last_detections, frame, hotspots=last_hotspot_data["hotspots"]
+                )
 
-            # Check all alert types
-            alert = alert_engine.check_and_generate(density_data)
-            hotspot_alerts = alert_engine.check_hotspots(hotspot_data)
-            convergence_alerts = alert_engine.check_convergence(movement_data)
+            # Check all alert types (cheap — run every frame)
+            alert = alert_engine.check_and_generate(last_density_data)
+            hotspot_alerts = alert_engine.check_hotspots(last_hotspot_data)
+            convergence_alerts = alert_engine.check_convergence(last_movement_data)
 
-            # Draw annotated frame with grid + hotspot indicators
-            annotated = draw_detections(
-                frame, detections, density_data["density_level"]
-            )
-            annotated = draw_density_grid(
-                annotated, hotspot_data["grid_density"], hotspot_data["hotspots"]
-            )
-            if hotspot_data["hotspots"]:
-                annotated = draw_hotspots_on_frame(annotated, hotspot_data["hotspots"])
-            frame_b64 = frame_to_base64(annotated)
+            # Record into analytics tracker
+            zone_counts = [z["count"] for z in last_density_data.get("zones", [])]
+            global_analytics.add_frame_data(last_density_data["total_count"], zone_counts, 0)
+
+            # Send raw frame for Client-Side Canvas rendering
+            frame_b64 = frame_to_base64(frame)
 
             # Calculate FPS
             frame_count += 1
@@ -426,19 +593,21 @@ async def video_websocket(websocket: WebSocket):
             message = {
                 "type": "frame",
                 "frame": frame_b64,
-                "heatmap": heatmap_b64,
+                "heatmap": last_heatmap_b64,
                 "stats": {
-                    **density_data,
+                    **last_density_data,
                     "fps": current_fps,
                     "timestamp": time.time(),
                     "time_str": time.strftime("%H:%M:%S"),
                 },
-                "hotspots": hotspot_data["hotspots"],
+                "hotspots": last_hotspot_data["hotspots"],
+                "detections": last_detections,
+                "grid_density": last_hotspot_data["grid_density"],
                 "movement": {
-                    "trends": movement_data["trends"],
-                    "convergence_zones": movement_data["convergence_zones"],
-                    "overall_direction": movement_data["overall_direction"],
-                    "avg_speed": movement_data["avg_speed"],
+                    "trends": last_movement_data["trends"],
+                    "convergence_zones": last_movement_data["convergence_zones"],
+                    "overall_direction": last_movement_data["overall_direction"],
+                    "avg_speed": last_movement_data["avg_speed"],
                 },
             }
 
@@ -456,8 +625,11 @@ async def video_websocket(websocket: WebSocket):
 
             await websocket.send_json(message)
 
-            # Frame pacing
-            await asyncio.sleep(config.FRAME_INTERVAL)
+            # Frame pacing — sleep only the remaining time after processing
+            processing_time = time.time() - frame_start
+            sleep_time = max(0, target_interval - processing_time)
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
 
     except WebSocketDisconnect:
         print("[WebSocket] Client disconnected")
@@ -771,17 +943,18 @@ async def camera_receiver(websocket: WebSocket, device_id: str):
                 except Exception:
                     continue
 
-                # Resize for performance
+                # Resize aggressively for AI inference performance (720 max width)
                 h, w = frame.shape[:2]
-                if w > 1280:
-                    scale = 1280 / w
-                    frame = cv2.resize(frame, (1280, int(h * scale)))
+                if w > 720:
+                    scale = 720 / w
+                    frame = cv2.resize(frame, (720, int(h * scale)))
 
                 # Run detection pipeline
-                if detector:
-                    detections = detector.detect_and_track(frame)
-                else:
-                    detections = []
+                with inference_lock:
+                    if detector:
+                        detections = detector.detect_and_track(frame)
+                    else:
+                        detections = []
 
                 density_data = dev_density.calculate_density(detections, frame.shape)
                 hotspot_data = dev_hotspot.analyze(detections, frame.shape)
@@ -795,12 +968,12 @@ async def camera_receiver(websocket: WebSocket, device_id: str):
                 hotspot_alerts = dev_alerts.check_hotspots(hotspot_data)
                 convergence_alerts = dev_alerts.check_convergence(movement_data)
 
-                # Draw annotated frame
-                annotated = draw_detections(frame, detections, density_data["density_level"])
-                annotated = draw_density_grid(annotated, hotspot_data["grid_density"], hotspot_data["hotspots"])
-                if hotspot_data["hotspots"]:
-                    annotated = draw_hotspots_on_frame(annotated, hotspot_data["hotspots"])
-                annotated_b64 = frame_to_base64(annotated)
+                # Record into analytics tracker
+                zone_counts = [z["count"] for z in density_data.get("zones", [])]
+                global_analytics.add_frame_data(density_data["total_count"], zone_counts, 0)
+
+                # Send raw frame for Client-Side Canvas rendering
+                annotated_b64 = frame_to_base64(frame)
 
                 # FPS calculation
                 frame_count += 1
@@ -825,6 +998,8 @@ async def camera_receiver(websocket: WebSocket, device_id: str):
                         "time_str": time.strftime("%H:%M:%S"),
                     },
                     "hotspots": hotspot_data["hotspots"],
+                    "detections": detections,
+                    "grid_density": hotspot_data["grid_density"],
                     "movement": {
                         "trends": movement_data["trends"],
                         "convergence_zones": movement_data["convergence_zones"],

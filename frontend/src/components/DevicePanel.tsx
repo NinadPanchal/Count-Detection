@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 
 interface Device {
   id: string;
@@ -18,11 +18,11 @@ interface DevicePanelProps {
   backendUrl: string;
 }
 
-export default function DevicePanel({
+const DevicePanel = ({
   activeSource,
   onSourceChange,
   backendUrl,
-}: DevicePanelProps) {
+}: DevicePanelProps) => {
   const [devices, setDevices] = useState<Device[]>([]);
   const [qrBlobUrl, setQrBlobUrl] = useState<string | null>(null);
   const [connectUrl, setConnectUrl] = useState<string>("");
@@ -144,9 +144,9 @@ export default function DevicePanel({
           <p className="stat-label text-[10px] mb-3">Scan to connect a device</p>
           <div className="inline-block p-2 rounded-xl bg-[#0c1220] border border-[var(--color-border)]">
             {qrBlobUrl ? (
-              <img src={qrBlobUrl} alt="QR Code" width={160} height={160} className="rounded-lg" />
+              <img src={qrBlobUrl} alt="QR Code" width={110} height={110} className="rounded-lg" />
             ) : (
-              <div className="w-[160px] h-[160px] flex items-center justify-center">
+              <div className="w-[110px] h-[110px] flex items-center justify-center">
                 <span className="text-[10px] text-[var(--color-text-tertiary)]">Loading QR...</span>
               </div>
             )}
@@ -161,4 +161,6 @@ export default function DevicePanel({
       </div>
     </div>
   );
-}
+};
+
+export default React.memo(DevicePanel);

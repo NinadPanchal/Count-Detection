@@ -5,11 +5,18 @@ Configuration for CrowdWatch — Crowd Management & Density Monitoring System
 # Video source: path to video file, or 0 for webcam
 VIDEO_SOURCE = "sample_video/crowd.mp4"
 
-# YOLOv8 model (nano for speed)
-MODEL_NAME = "yolov8n.pt"
+# Explicit mapping of cameras/video feeds
+AVAILABLE_CAMERAS = [
+    {"id": "cam-1", "name": "Main Entrance", "path": "sample_video/crowd.mp4", "zone": "Zone 1"},
+    {"id": "cam-2", "name": "Center Area", "path": "sample_video/crowd6.mp4", "zone": "Zone 2"},
+    {"id": "cam-3", "name": "Exit Corridor", "path": "sample_video/crowd11.mp4", "zone": "Zone 3"},
+]
+
+# YOLO11 model (medium — best accuracy/speed trade-off on M4 Apple Silicon)
+MODEL_NAME = "yolo11m.pt"
 
 # Detection confidence threshold
-CONFIDENCE_THRESHOLD = 0.35
+CONFIDENCE_THRESHOLD = 0.15
 
 # Person class ID in COCO dataset
 PERSON_CLASS_ID = 0
@@ -24,9 +31,9 @@ HEATMAP_BLUR_KERNEL = 51  # Gaussian blur kernel size
 HEATMAP_ALPHA = 0.4  # overlay transparency
 
 # Alert cooldown (seconds) — prevent spam
-ALERT_COOLDOWN = 10
+ALERT_COOLDOWN = 30
 
-# Target FPS for processing
+# Target FPS for processing (matches source video)
 TARGET_FPS = 25
 
 # WebSocket frame send interval (seconds)
@@ -34,7 +41,7 @@ FRAME_INTERVAL = 1.0 / TARGET_FPS
 
 # Server settings
 HOST = "0.0.0.0"
-PORT = 8000
+PORT = 8002
 
 # Zone definitions (normalized coordinates: x1, y1, x2, y2)
 # These define monitoring zones within the frame
@@ -58,5 +65,5 @@ MOVEMENT_SPEED_MIN = 2.0       # minimum pixel displacement per frame to count a
 
 # --- External Camera Streaming ---
 CAMERA_SECRET_KEY = "crowdwatch-2024-hackathon"   # used to generate auth tokens for QR URLs
-CAMERA_FRAME_INTERVAL = 1.0 / 15                  # phone streams at ~15 FPS to save bandwidth
+CAMERA_FRAME_INTERVAL = 1.0 / 24                  # aligned to user requested 24 FPS
 CAMERA_MAX_DEVICES = 8                             # max simultaneous camera connections

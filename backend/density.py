@@ -66,23 +66,24 @@ class DensityEstimator:
                 "density_level": zone_level,
             })
 
-        # Overall density level
-        from config import DENSITY_WARNING_THRESHOLD, DENSITY_CRITICAL_THRESHOLD
-        if total >= DENSITY_CRITICAL_THRESHOLD:
-            level = "critical"
-        elif total >= DENSITY_WARNING_THRESHOLD:
-            level = "warning"
-        else:
-            level = "safe"
-
-        # Rolling average
+        # Rolling average for overall count
         self.density_history.append(total)
         if len(self.density_history) > self.max_history:
             self.density_history.pop(0)
         avg = sum(self.density_history) / len(self.density_history)
 
+        # Overall density level based on smooth average, not raw total
+        from config import DENSITY_WARNING_THRESHOLD, DENSITY_CRITICAL_THRESHOLD
+        if avg >= DENSITY_CRITICAL_THRESHOLD:
+            level = "critical"
+        elif avg >= DENSITY_WARNING_THRESHOLD:
+            level = "warning"
+        else:
+            level = "safe"
+
         return {
-            "total_count": total,
+            "total_count": int(avg),
+            "raw_count": total,
             "density_level": level,
             "zones": zone_stats,
             "avg_density": round(avg, 1),

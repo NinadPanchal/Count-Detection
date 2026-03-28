@@ -13,6 +13,12 @@ interface Hotspot {
   frames_active: number;
 }
 
+interface Detection {
+  bbox: [number, number, number, number];
+  confidence: number;
+  track_id: number;
+}
+
 interface MovementTrend {
   zone_id: string;
   cell: [number, number];
@@ -66,6 +72,8 @@ interface FrameData {
     time_str: string;
   };
   hotspots?: Hotspot[];
+  detections?: Detection[];
+  grid_density?: number[][];
   movement?: MovementData;
   alert?: AlertData;
   extra_alerts?: AlertData[];
@@ -79,7 +87,7 @@ interface UseWebSocketReturn {
   reconnect: () => void;
 }
 
-export type { Hotspot, MovementTrend, ConvergenceZone, MovementData, AlertData, FrameData };
+export type { Hotspot, Detection, MovementTrend, ConvergenceZone, MovementData, AlertData, FrameData };
 
 export function useWebSocket(url: string): UseWebSocketReturn {
   const [frameData, setFrameData] = useState<FrameData | null>(null);
@@ -108,7 +116,15 @@ export function useWebSocket(url: string): UseWebSocketReturn {
         if (!mountedRef.current) return;
         try {
           const data: FrameData = JSON.parse(event.data);
-          setFrameData(data);
+          
+          // CRITICAL OPTIMIZATION: Bypassing React's render loop for video streaming
+          // Dispatch raw payload via DOM so VideoFeed.tsx can draw canvas + image natively
+          window.dispatchEvent(new CustomEvent("crowdFrame", { detail: data }));
+
+          // Now strip out the 100KB+ base64 blobs before sending to React State tree
+          // This entirely prevents React from diffing massive UI updates 10 times a second
+          const slicedData = { ...data, frame: "", heatmap: "" };
+          setFrameData(slicedData as FrameData);
 
           // Collect all alerts from this frame
           const frameAlerts: AlertData[] = [];
@@ -117,7 +133,7 @@ export function useWebSocket(url: string): UseWebSocketReturn {
 
           if (frameAlerts.length > 0) {
             setAlerts((prev) => {
-              const newAlerts = [...frameAlerts, ...prev].slice(0, 30);
+              const newAlerts = [...frameAlerts, ...prev].slice(0, 50);
               return newAlerts;
             });
           }
