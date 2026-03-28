@@ -14,6 +14,7 @@ AVAILABLE_CAMERAS = [
 
 # YOLO11 model (medium — best accuracy/speed trade-off on M4 Apple Silicon)
 MODEL_NAME = "yolo11m.pt"
+YOLO_IMGSZ = 960              # Reduced from 1280 — sweet spot for M-series silicon
 
 # Detection confidence threshold
 CONFIDENCE_THRESHOLD = 0.15
@@ -27,8 +28,16 @@ DENSITY_CRITICAL_THRESHOLD = 30  # people count to trigger critical alert
 
 # Heatmap settings
 HEATMAP_GRID_SIZE = 20  # grid cells for density calculation
-HEATMAP_BLUR_KERNEL = 51  # Gaussian blur kernel size
+HEATMAP_BLUR_KERNEL = 31  # Gaussian blur kernel size (reduced from 51 for speed)
 HEATMAP_ALPHA = 0.4  # overlay transparency
+
+# Streaming JPEG quality settings
+STREAM_JPEG_QUALITY = 55      # Main video stream (reduced from 70 — 40% smaller payloads)
+HEATMAP_JPEG_QUALITY = 50     # Heatmap overlay (blurred, quality doesn't matter)
+
+# Pipeline throttle — metadata & heatmaps sent every Nth frame
+METADATA_SEND_INTERVAL = 3    # Only send detections/grid/movement every 3rd frame
+CASCADE_RUN_INTERVAL = 3      # Only run Haar cascades every 3rd frame
 
 # Alert cooldown (seconds) — prevent spam
 ALERT_COOLDOWN = 30

@@ -7,6 +7,7 @@ import asyncio
 import base64
 import io
 import json
+import orjson
 import socket
 import time
 import os
@@ -461,7 +462,7 @@ def draw_hotspots_on_frame(frame: np.ndarray, hotspots: list[dict]) -> np.ndarra
 
 def frame_to_base64(frame: np.ndarray) -> str:
     """Encode frame as base64 JPEG."""
-    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, config.STREAM_JPEG_QUALITY])
     return base64.b64encode(buffer).decode("utf-8")
 
 
@@ -501,9 +502,12 @@ async def video_websocket(websocket: WebSocket):
     fps_start = time.time()
     current_fps = 0
 
-    # Get source video FPS for accurate pacing
+    # Cap output at 15fps — sustainable for YOLO + encode + WebSocket + browser decode
     source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    target_interval = 1.0 / source_fps
+    OUTPUT_FPS = 15.0
+    target_interval = 1.0 / OUTPUT_FPS
+    # How many source frames to skip per output frame (e.g. 30fps source → skip every other)
+    frame_skip = max(1, int(round(source_fps / OUTPUT_FPS)))
 
     # Detection state — reuse between frames for smooth playback
     last_detections = []
@@ -511,7 +515,6 @@ async def video_websocket(websocket: WebSocket):
     last_hotspot_data = {"hotspots": [], "grid_density": []}
     last_movement_data = {"trends": [], "convergence_zones": [], "overall_direction": "stable", "avg_speed": 0}
     last_heatmap_b64 = ""
-    detect_every_n = 1  # 1 = MAX POWER (run AI detection on every frame for the active stream)
     video_frame_idx = 0
 
     try:
@@ -528,7 +531,7 @@ async def video_websocket(websocket: WebSocket):
                 
                 if cap.isOpened():
                     source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-                    target_interval = 1.0 / source_fps
+                    frame_skip = max(1, int(round(source_fps / OUTPUT_FPS)))
                 else:
                     print(f"[WebSocket] Failed to hot-swap to {local_source}")
                     break
@@ -537,8 +540,14 @@ async def video_websocket(websocket: WebSocket):
                 last_detections = []
                 system_stats["video_source"] = local_source
 
-            ret, frame = cap.read()
-            if not ret:
+            # Skip frames to stay in sync — read and discard intermediate frames
+            frame = None
+            for _ in range(frame_skip):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+            if not ret or frame is None:
                 # Loop video for demo
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 video_frame_idx = 0
@@ -548,8 +557,17 @@ async def video_websocket(websocket: WebSocket):
 
             video_frame_idx += 1
 
-            # Run full AI pipeline only every N frames for speed
-            if video_frame_idx % detect_every_n == 1 or detect_every_n == 1:
+            # Downscale frame for speed and bandwidth
+            h, w = frame.shape[:2]
+            target_w = config.YOLO_IMGSZ
+            if w > target_w:
+                scale = target_w / w
+                frame = cv2.resize(frame, (target_w, int(h * scale)))
+
+            send_metadata = (video_frame_idx % config.METADATA_SEND_INTERVAL == 0) or video_frame_idx == 1
+
+            # Run full AI pipeline on metadata frames
+            if send_metadata:
                 with inference_lock:
                     if detector:
                         last_detections = detector.detect_and_track(frame)
@@ -567,14 +585,18 @@ async def video_websocket(websocket: WebSocket):
                     last_detections, frame, hotspots=last_hotspot_data["hotspots"]
                 )
 
-            # Check all alert types (cheap — run every frame)
-            alert = alert_engine.check_and_generate(last_density_data)
-            hotspot_alerts = alert_engine.check_hotspots(last_hotspot_data)
-            convergence_alerts = alert_engine.check_convergence(last_movement_data)
+                # Check all alert types
+                alert = alert_engine.check_and_generate(last_density_data)
+                hotspot_alerts = alert_engine.check_hotspots(last_hotspot_data)
+                convergence_alerts = alert_engine.check_convergence(last_movement_data)
 
-            # Record into analytics tracker
-            zone_counts = [z["count"] for z in last_density_data.get("zones", [])]
-            global_analytics.add_frame_data(last_density_data["total_count"], zone_counts, 0)
+                # Record into analytics tracker
+                zone_counts = [z["count"] for z in last_density_data.get("zones", [])]
+                global_analytics.add_frame_data(last_density_data["total_count"], zone_counts, 0)
+            else:
+                alert = None
+                hotspot_alerts = []
+                convergence_alerts = []
 
             # Send raw frame for Client-Side Canvas rendering
             frame_b64 = frame_to_base64(frame)
@@ -593,23 +615,25 @@ async def video_websocket(websocket: WebSocket):
             message = {
                 "type": "frame",
                 "frame": frame_b64,
-                "heatmap": last_heatmap_b64,
                 "stats": {
                     **last_density_data,
                     "fps": current_fps,
                     "timestamp": time.time(),
                     "time_str": time.strftime("%H:%M:%S"),
                 },
-                "hotspots": last_hotspot_data["hotspots"],
-                "detections": last_detections,
-                "grid_density": last_hotspot_data["grid_density"],
-                "movement": {
+            }
+
+            if send_metadata:
+                message["heatmap"] = last_heatmap_b64
+                message["hotspots"] = last_hotspot_data["hotspots"]
+                message["detections"] = last_detections
+                message["grid_density"] = last_hotspot_data["grid_density"]
+                message["movement"] = {
                     "trends": last_movement_data["trends"],
                     "convergence_zones": last_movement_data["convergence_zones"],
                     "overall_direction": last_movement_data["overall_direction"],
                     "avg_speed": last_movement_data["avg_speed"],
-                },
-            }
+                }
 
             # Collect all alerts for this frame
             all_alerts = []
@@ -623,9 +647,9 @@ async def video_websocket(websocket: WebSocket):
                 if len(all_alerts) > 1:
                     message["extra_alerts"] = all_alerts[1:]
 
-            await websocket.send_json(message)
+            await websocket.send_bytes(orjson.dumps(message))
 
-            # Frame pacing — sleep only the remaining time after processing
+            # Frame pacing — sleep remaining time to maintain target FPS
             processing_time = time.time() - frame_start
             sleep_time = max(0, target_interval - processing_time)
             if sleep_time > 0:
@@ -790,7 +814,7 @@ async def demo_websocket(websocket: WebSocket):
                 if len(all_alerts) > 1:
                     message["extra_alerts"] = all_alerts[1:]
 
-            await websocket.send_json(message)
+            await websocket.send_bytes(orjson.dumps(message))
             await asyncio.sleep(config.FRAME_INTERVAL)
 
     except WebSocketDisconnect:
@@ -1057,7 +1081,7 @@ async def device_feed(websocket: WebSocket, device_id: str):
                 last_frame_count = current_count
                 processed = dev.get("_latest_processed")
                 if processed:
-                    await websocket.send_json(processed)
+                    await websocket.send_bytes(orjson.dumps(processed))
 
             await asyncio.sleep(config.CAMERA_FRAME_INTERVAL)
 

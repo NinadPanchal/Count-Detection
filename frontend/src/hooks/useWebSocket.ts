@@ -112,19 +112,34 @@ export function useWebSocket(url: string): UseWebSocketReturn {
         console.log("[WebSocket] Connected");
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         if (!mountedRef.current) return;
         try {
-          const data: FrameData = JSON.parse(event.data);
+          // If the backend sends binary data (via send_bytes + orjson), it arrives as a Blob
+          const textData = typeof event.data === "string" ? event.data : await (event.data as Blob).text();
+          const data: FrameData = JSON.parse(textData);
           
-          // CRITICAL OPTIMIZATION: Bypassing React's render loop for video streaming
-          // Dispatch raw payload via DOM so VideoFeed.tsx can draw canvas + image natively
-          window.dispatchEvent(new CustomEvent("crowdFrame", { detail: data }));
+          setFrameData((prevData) => {
+            // Because we throttled metadata to save 60% bandwidth on intermediate frames,
+            // we must merge the incoming lightweight frame with the last known metadata.
+            const mergedData = {
+              ...data,
+              heatmap: data.heatmap ?? prevData?.heatmap,
+              hotspots: data.hotspots ?? prevData?.hotspots,
+              detections: data.detections ?? prevData?.detections,
+              grid_density: data.grid_density ?? prevData?.grid_density,
+              movement: data.movement ?? prevData?.movement,
+            };
 
-          // Now strip out the 100KB+ base64 blobs before sending to React State tree
-          // This entirely prevents React from diffing massive UI updates 10 times a second
-          const slicedData = { ...data, frame: "", heatmap: "" };
-          setFrameData(slicedData as FrameData);
+            // CRITICAL OPTIMIZATION: Bypassing React's render loop for video streaming
+            // Dispatch raw payload via DOM so VideoFeed.tsx can draw canvas + image natively
+            window.dispatchEvent(new CustomEvent("crowdFrame", { detail: mergedData }));
+
+            // Now strip out the 100KB+ base64 blobs before sending to React State tree
+            // This entirely prevents React from diffing massive UI updates 10 times a second
+            const slicedData = { ...mergedData, frame: "", heatmap: "" };
+            return slicedData as FrameData;
+          });
 
           // Collect all alerts from this frame
           const frameAlerts: AlertData[] = [];

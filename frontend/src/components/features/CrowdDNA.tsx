@@ -43,10 +43,10 @@ export function CrowdDNA({ count, density, direction, zones, size = 120 }: Crowd
             <circle cx={cx} cy={cy} r={ring.radius} fill="none" stroke="rgba(123,97,255,0.08)" strokeWidth="0.5" />
             {ring.segments.map((seg, si) => {
               const rad = (seg.angle * Math.PI) / 180;
-              const x1 = cx + ring.radius * Math.cos(rad);
-              const y1 = cy + ring.radius * Math.sin(rad);
-              const x2 = cx + (ring.radius + seg.length) * Math.cos(rad);
-              const y2 = cy + (ring.radius + seg.length) * Math.sin(rad);
+              const x1 = (cx + ring.radius * Math.cos(rad)).toFixed(3);
+              const y1 = (cy + ring.radius * Math.sin(rad)).toFixed(3);
+              const x2 = (cx + (ring.radius + seg.length) * Math.cos(rad)).toFixed(3);
+              const y2 = (cy + (ring.radius + seg.length) * Math.sin(rad)).toFixed(3);
               return (
                 <line key={si} x1={x1} y1={y1} x2={x2} y2={y2} stroke={seg.color} strokeWidth="1.5" strokeLinecap="round" opacity="0.7" />
               );
